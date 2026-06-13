@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """
-RTK Base Station — Phase 1 UBX Receiver
+RTK Base Station — Phase 1 UBX Receiver (reconnect-resilient)
 
-Listens on TCP port 5555, accepts one connection from the ESP32 logger,
-and writes all incoming bytes to a timestamped .ubx file.
+Listens on TCP port 5555 and writes all incoming bytes from the ESP32
+logger to a single timestamped .ubx file for the whole session.
+
+Unlike the original single-accept version, this loops on accept(): if the
+ESP32 drops WiFi or reboots and reconnects, the receiver picks the new
+connection up and keeps appending to the same file. TCP keepalive is
+enabled so a powered-off client is detected instead of blocking forever.
 
 Usage:
     python3 ubx_receiver.py
@@ -16,12 +21,11 @@ import time
 import datetime
 import signal
 import sys
-import os
 
 HOST = "0.0.0.0"
 PORT = 5555
 STATUS_INTERVAL = 60        # seconds between progress prints
-WRITE_CHUNK = 4096          # flush to disk every 4KB
+WRITE_CHUNK = 4096          # recv/flush size
 
 
 def format_bytes(n):
@@ -48,25 +52,34 @@ def main():
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((HOST, PORT))
     server.listen(1)
-    print(f"Listening on {HOST}:{PORT}...")
-    print(f"Output file: {filename}")
+    print(f"Listening on {HOST}:{PORT}...", flush=True)
+    print(f"Output file: {filename}", flush=True)
 
-    conn = None
-    outfile = None
+    outfile = open(filename, "ab")
     total_bytes = 0
-    start_time = None
+    start_time = time.time()
+    last_status = start_time
+    conn = None
 
     def shutdown(signum=None, frame=None):
-        print("\nShutting down...")
-        if outfile and not outfile.closed:
+        print("\nShutting down...", flush=True)
+        try:
             outfile.flush()
             outfile.close()
+        except Exception:
+            pass
         if conn:
-            conn.close()
-        server.close()
+            try:
+                conn.close()
+            except Exception:
+                pass
+        try:
+            server.close()
+        except Exception:
+            pass
 
         if total_bytes > 0:
-            elapsed = time.time() - start_time if start_time else 0
+            elapsed = time.time() - start_time
             print(f"\nSession complete.")
             print(f"  File:     {filename}")
             print(f"  Size:     {format_bytes(total_bytes)}")
@@ -80,48 +93,47 @@ def main():
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
-    try:
+    # Accept loop: survive client reconnects, keep appending to the same file.
+    while True:
         conn, addr = server.accept()
-        print(f"Client connected from {addr[0]}:{addr[1]}")
-        start_time = time.time()
-        last_status = start_time
-        outfile = open(filename, "wb")
+        print(f"Client connected from {addr[0]}:{addr[1]}", flush=True)
 
-        buf = bytearray()
+        # Detect a silently-dead peer instead of blocking in recv() forever.
+        conn.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        try:
+            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)
+            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)
+            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+        except (AttributeError, OSError):
+            pass
 
-        while True:
+        try:
+            while True:
+                try:
+                    data = conn.recv(WRITE_CHUNK)
+                except (ConnectionResetError, TimeoutError, OSError):
+                    print("Client connection lost; waiting for reconnect...", flush=True)
+                    break
+
+                if not data:
+                    print("Client closed connection; waiting for reconnect...", flush=True)
+                    break
+
+                outfile.write(data)
+                outfile.flush()
+                total_bytes += len(data)
+
+                now = time.time()
+                if now - last_status >= STATUS_INTERVAL:
+                    elapsed = now - start_time
+                    print(f"[{format_elapsed(elapsed)}] {format_bytes(total_bytes)} received", flush=True)
+                    last_status = now
+        finally:
             try:
-                data = conn.recv(WRITE_CHUNK)
-            except (ConnectionResetError, OSError):
-                print("Client disconnected.")
-                break
-
-            if not data:
-                print("Client closed connection.")
-                break
-
-            buf.extend(data)
-            total_bytes += len(data)
-
-            # Flush accumulated data to disk
-            if len(buf) >= WRITE_CHUNK:
-                outfile.write(buf)
-                buf.clear()
-
-            now = time.time()
-            if now - last_status >= STATUS_INTERVAL:
-                elapsed = now - start_time
-                print(f"[{format_elapsed(elapsed)}] {format_bytes(total_bytes)} received")
-                last_status = now
-
-        # Flush remaining buffer
-        if buf:
-            outfile.write(buf)
-
-    except Exception as e:
-        print(f"Error: {e}")
-    finally:
-        shutdown()
+                conn.close()
+            except Exception:
+                pass
+            conn = None
 
 
 if __name__ == "__main__":

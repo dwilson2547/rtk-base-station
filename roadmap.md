@@ -4,11 +4,11 @@
 
 **Goal:** Capture a 24-hour raw GNSS observation file from the permanent antenna location and submit it to NGS OPUS to obtain precise base coordinates.
 
-**Status: 24-hour capture in progress (started 2026-06-10)**
+**Status: 24-hour capture in progress (restarted 2026-06-12 ~19:16 UTC after the permanent roof install; file `raw_obs_20260612_191614.ubx` on devnode). Verified streaming RXM-RAWX @ 1 Hz + RXM-SFRBX, ~3.2 KB/s.**
 
 ### What was built
 - **`firmware/phase1_raw_logger/`** — ESP32 Arduino sketch that connects to the F9P over I2C, enables RXM-RAWX + RXM-SFRBX logging, and streams raw UBX bytes over WiFi/TCP to the homelab
-- **`receiver/ubx_receiver.py`** — Python TCP server that writes the incoming stream to a timestamped `.ubx` file and prints progress every 60 seconds
+- **`receiver/ubx_receiver.py`** — Python TCP server that writes the incoming stream to a timestamped `.ubx` file and prints progress every 60 seconds. Loops on `accept()` with TCP keepalive so an ESP32 WiFi drop/reboot resumes into the same file instead of silently stalling the capture
 - **`firmware/f9p_verify/`** — verifier sketch that reads back all F9P config keys and prints a pass/fail report; all 20 checks currently pass
 
 ### F9P config locked in
@@ -21,8 +21,8 @@
 ### Remaining step to close Phase 1
 1. ~~Set WiFi credentials and homelab IP~~ ✅ serverIP set to devnode (192.168.0.55)
 2. ~~Flash Phase 1 logger sketch~~ ✅ Running on ESP32
-3. ~~Start Python receiver on homelab~~ ✅ Running on devnode, writing `raw_obs_20260610_194900.ubx`
-4. Let capture run 24 hours — **in progress**, allow to complete before proceeding to Phase 2
+3. ~~Start Python receiver on homelab~~ ✅ Running on devnode, writing `raw_obs_20260612_191614.ubx`
+4. Let capture run 24 hours — **in progress** (completes ~2026-06-13 19:16 UTC), allow to complete before proceeding to Phase 2
 
 ---
 
@@ -80,7 +80,7 @@ The ESP32 reads RTCM3 from the F9P over I2C and handles the NTRIP HTTP handshake
    - Mount point: `BASE1`
    - Port: `2101`
 
-2. **Assign static IP to ESP32** on the MikroTik DHCP server (bind by MAC)
+2. ~~**Assign static IP to ESP32** on the MikroTik DHCP server (bind by MAC)~~ ✅ Done — DHCP reservation in place
 
 3. **Flash caster sketch** with WiFi credentials and static IP
 

@@ -1,70 +1,96 @@
-# RTK Base Station — Claude Code Handoff
+# RTK Base Station
 
-## Project Goal
+A permanent rooftop RTK GNSS base station that serves centimeter-accurate RTCM3
+corrections to rovers on the local network via a self-hosted NTRIP caster. The
+end result is a LAN-hosted correction source for 3D scanning, vehicle SLAM, and
+robotics — no dependency on external services like RTK2Go.
 
-Build a permanent rooftop RTK GNSS base station that serves centimeter-accurate RTCM3 corrections to rovers on the local network via NTRIP. The final output is a homelab-hosted correction source for 3D scanning, vehicle SLAM, and robotics projects.
+The build runs in three phases:
 
----
+1. **Phase 1 — Raw observation logging:** capture a 24-hour raw UBX file and
+   submit it to NGS OPUS to derive precise base coordinates.
+2. **Phase 2 — Fixed position:** load the OPUS coordinates into the F9P
+   (`TMODE3 Fixed`) so it outputs corrections referenced to a known point.
+3. **Phase 3 — NTRIP caster:** flash caster firmware and serve corrections to
+   rovers on the LAN, permanently.
 
-## Hardware
-
-| Component | Part | Notes |
-|-----------|------|-------|
-| GNSS Receiver | u-blox ZED-F9P (SparkFun breakout) | L1/L2 dual-band RTK |
-| Microcontroller | SparkFun ESP32 | Connected to F9P via **Qwiic (I2C)** — NOT UART |
-| Antenna | SPK6618H | Mounted on dish pole, rooftop |
-| Power | PoE splitter | Weatherproof enclosure, roof-mounted |
-| Backup | 1200mAh LiPo | Sufficient for short outages |
-
-**Critical:** The F9P ↔ ESP32 link is **I2C over Qwiic**, not UART. Any Arduino sketch must use the SparkFun u-blox GNSS v3 library (I2C mode). A UART-based sketch will not work.
+See **[`roadmap.md`](roadmap.md)** for detailed per-phase steps and current status.
 
 ---
 
-## Current Project State
+## Repository layout
 
-The project is in **Phase 1 (raw observation logging)**. The base station was permanently mounted on the roof and the 24-hour capture (re)started **2026-06-12 ~19:16 UTC** (`raw_obs_20260612_191614.ubx` on devnode). The ESP32 is streaming raw UBX data to the Python receiver on devnode (192.168.0.55). See `roadmap.md` for full phase status.
-
-> **Receiver gotcha (fixed 2026-06-12):** the original `ubx_receiver.py` called `accept()` exactly once. When the ESP32 dropped and reconnected (e.g. roof reinstall), the receiver stayed blocked on the dead socket while the new connection piled up unread in the kernel backlog — the file silently stopped growing. The receiver now loops on `accept()`, enables TCP keepalive, and appends to one session file across reconnects. **Always verify the `.ubx` file is actually growing, not just that the process/port is up.** Original saved as `ubx_receiver.py.bak-20260612`.
-
-### Phase 1 — Raw Observation Logging (current phase)
-Collect a 24-hour raw UBX observation file, convert to RINEX, submit to NGS OPUS to get precise base coordinates.
-
-> **Next step — on/after 2026-06-13 ~19:16 UTC** (24 h mark). SSH to devnode and confirm the capture is complete and healthy, then convert + submit:
-> ```bash
-> ssh devnode
-> cd ~/rtk_base_station
-> # 1. Confirm ~24h of data and that it's still growing (sanity: ~3.2 KB/s, should be a few hundred MB)
-> ls -lh raw_obs_20260612_191614.ubx
-> # 2. Stop the receiver cleanly (Ctrl+C if foreground, else: pkill -f ubx_receiver.py)
-> # 3. Convert UBX -> RINEX  (convbin is part of RTKLIB; build/install if missing)
-> convbin raw_obs_20260612_191614.ubx -o observation.obs -r ubx
-> # 4. Submit observation.obs to OPUS: https://www.ngs.noaa.gov/OPUS/
-> #    (approx position + antenna height; OPUS emails back precise ECEF/LLA)
-> ```
-> Then proceed to the Phase 1 → Phase 2 transition workflow below (enter OPUS coords in TMODE3).
-
-### Phase 2 — Permanent NTRIP Caster (final phase)
-Flash NTRIP caster firmware, enter OPUS-derived fixed coordinates into F9P TMODE3, and leave running permanently.
+| Path | What it is |
+|------|------------|
+| `firmware/phase1_raw_logger/` | ESP32 sketch: enables RXM-RAWX + RXM-SFRBX on the F9P over I2C and streams raw UBX over WiFi/TCP to the receiver |
+| `firmware/f9p_verify/` | ESP32 sketch that reads back every F9P config key and prints a pass/fail report (20 checks) — run this to confirm config survived a power cycle or firmware update |
+| `firmware/i2c_scan/` | Minimal I2C bus scanner — first thing to run when bringing up the wiring |
+| `receiver/ubx_receiver.py` | Homelab-side TCP server: writes the incoming UBX stream to a timestamped `.ubx` file, reconnect-resilient |
+| `docs/issues/` | Write-ups of real bugs hit during bring-up (I2C addressing, bus lockup, wrong board variant) — **read these before wiring** |
+| `roadmap.md` | Phased project plan and live status |
 
 ---
 
-## F9P Configuration (already applied via u-center)
+## Architecture
 
-All settings saved to BBR + Flash. Verify these survived if firmware was updated.
+```
+[ZED-F9P] --I2C / Qwiic--> [ESP32] --WiFi/TCP--> [receiver / NTRIP client]
+   (all GNSS math)         (network interface)
+```
 
-**UBX-CFG-NAV5**
-- Dynamic Platform Model: `Stationary (2)`
+The F9P is the brain — it does all GNSS computation and emits raw UBX (Phase 1)
+or RTCM3 (Phase 3). The ESP32 is purely a network interface. In Phase 1 the
+ESP32 is a **TCP client** pushing bytes to the receiver; in Phase 3 it is an
+**NTRIP caster** that rovers connect to directly.
 
-**UBX-CFG-RATE**
-- Measurement Period: `1000ms (1 Hz)`
+---
 
-**UBX-CFG-GNSS** — All four constellations enabled, L1+L2:
-- GPS (L1C/A + L2C)
-- GLONASS (L1 + L2)
-- Galileo (E1 + E5b)
-- BeiDou (B1I + B2I)
+## Bill of materials
 
-**UBX-CFG-MSG** — RTCM3 output on I2C port:
+| Component | Part used | Notes |
+|-----------|-----------|-------|
+| GNSS receiver | u-blox ZED-F9P (SparkFun breakout) | L1/L2 dual-band RTK |
+| Microcontroller | SparkFun ESP32 (Thing Plus) | Connected to F9P via **Qwiic (I2C)** — NOT UART |
+| Antenna | SPK6618H | Multi-band, mounted on a pole, rooftop |
+| Power | PoE splitter | In a weatherproof roof enclosure |
+| Backup | 1200 mAh LiPo | Rides out short power outages |
+
+> **Critical — the F9P ↔ ESP32 link is I2C over Qwiic, not UART.** Every sketch
+> here uses the **SparkFun u-blox GNSS v3** library in I2C mode. A UART-based
+> sketch will not work with this wiring.
+
+---
+
+## Replication guide
+
+### 0. Wire it up and verify the bus
+
+Connect the F9P to the ESP32 with a Qwiic cable (I2C: SDA/SCL/3V3/GND). Then,
+**before anything else, read [`docs/issues/`](docs/issues/)** — these three
+bring-up bugs will each silently waste hours if you hit them blind:
+
+- **[Wrong ESP32 board variant → I2C goes nowhere](docs/issues/2026_06_10_wrong_esp32_board_variant_i2c_pins.md)** — selecting the wrong board in Arduino sends all I2C traffic to unconnected GPIO.
+- **[F9P I2C address / register encoding](docs/issues/2026_06_10_f9p_i2c_address_register_encoding.md)** — `CFG-I2C-ADDRESS` is the 8-bit value; setting `0x42` actually moves the device to 7-bit `0x21`.
+- **[F9P I2C bus lockup from the RAWX buffer](docs/issues/2026_06_10_f9p_i2c_bus_lockup_rawx_buffer.md)** — the F9P holds SDA low after restart if its unread I2C output buffer fills with RAWX data.
+
+Flash **`firmware/i2c_scan/`** and confirm the F9P shows up on the bus before
+moving on. **`firmware/f9p_verify/`** can be run at any point to dump the full
+config and check it against expected values.
+
+### 1. Configure the F9P (u-center, one-time)
+
+Connect the F9P over USB and apply these via u-center, then **save to BBR +
+Flash** (`UBX-CFG-CFG`). `firmware/f9p_verify/` validates all of them.
+
+**UBX-CFG-NAV5** — Dynamic Platform Model: `Stationary (2)`
+**UBX-CFG-RATE** — Measurement Period: `1000 ms (1 Hz)`
+**UBX-CFG-PRT (I2C)** — Protocol Out: `UBX only` (NMEA disabled on I2C)
+**UBX-CFG-TMODE3** — `Mode 0 — Disabled` (correct for Phase 1; set to Fixed in Phase 2)
+
+**UBX-CFG-GNSS** — all four constellations, L1 + L2:
+GPS (L1C/A + L2C), GLONASS (L1 + L2), Galileo (E1 + E5b), BeiDou (B1I + B2I)
+
+**UBX-CFG-MSG** — RTCM3 output on the I2C port (used in Phase 3; harmless in Phase 1):
 
 | Hex ID | Message | Description | Rate |
 |--------|---------|-------------|------|
@@ -75,39 +101,24 @@ All settings saved to BBR + Flash. Verify these survived if firmware was updated
 | F5-7F | 1127 | BeiDou MSM7 | 1 |
 | F5-E6 | 1230 | GLONASS code-phase biases | 5 |
 
-MSM7 chosen over MSM4 for full-resolution carrier phase, Doppler, and signal strength.
+> MSM7 over MSM4 gives full-resolution carrier phase, Doppler, and signal
+> strength — worth the slightly larger messages.
 
-**UBX-CFG-TMODE3**
-- Currently: `Mode 0 — Disabled` (correct for Phase 1 logging)
-- After OPUS: change to `Mode 2 — Fixed Position` with OPUS-derived coordinates
+### 2. Phase 1 — capture 24 h of raw observations
 
-**UBX-CFG-PRT / I2C output**
-- Protocol Out: UBX only (NMEA disabled on I2C)
+**a. Flash the logger.** In `firmware/phase1_raw_logger/phase1_raw_logger.ino`,
+set your WiFi and the IP of the machine that will run the receiver:
 
----
-
-## Phase 1: ESP32 Raw Logger Sketch
-
-### What it does
-- Connects to WiFi
-- Programmatically enables RXM-RAWX and RXM-SFRBX on the F9P via I2C (SparkFun GNSS v3 library file buffer feature)
-- Acts as TCP **client**, pushing raw UBX bytes to a Python receiver on the homelab at a hardcoded IP:port (5555)
-- Prints periodic status to Serial (bytes sent, connection state)
-
-### Arduino dependencies
-- Board: `esp32` by Espressif (install via Boards Manager)
-- Library: `SparkFun u-blox GNSS v3` (install via Library Manager)
-
-### Configuration variables to set before flashing
 ```cpp
 const char* ssid       = "YOUR_WIFI_SSID";
 const char* password   = "YOUR_WIFI_PASSWORD";
-const char* serverIP   = "HOMELAB_IP";   // machine running the Python receiver
+const char* serverIP   = "192.168.0.55";  // host running ubx_receiver.py
 const int   serverPort = 5555;
 ```
 
-### Expected Serial output
-On boot should print:
+Dependencies (Arduino): board `esp32` by Espressif; library `SparkFun u-blox
+GNSS v3`. On boot the serial console should show:
+
 ```
 F9P connected
 RXM-RAWX enabled
@@ -117,107 +128,95 @@ TCP connected to 192.168.x.x:5555
 Streaming... [bytes_sent] bytes
 ```
 
-If it prints `F9P not detected` — check I2C wiring (SDA/SCL on Qwiic) and confirm F9P is powered.
+If it prints `F9P not detected`, recheck the Qwiic/I2C wiring and F9P power —
+and revisit the issues in step 0.
 
----
+**b. Run the receiver** on the homelab host (the one at `serverIP`):
 
-## Phase 1: Python Receiver Script (homelab side)
-
-Runs on any homelab machine (OptiPlex). Listens on TCP port 5555, writes a timestamped `.ubx` file, prints progress every 60 seconds, and on exit prints the `convbin` command and OPUS submission link.
-
-### Run it
 ```bash
-python3 ubx_receiver.py
+python3 receiver/ubx_receiver.py
 ```
 
-### Expected output
+It listens on `0.0.0.0:5555`, writes `raw_obs_YYYYMMDD_HHMMSS.ubx`, and prints
+progress every 60 s. It loops on `accept()` with TCP keepalive, so if the ESP32
+drops WiFi or reboots it resumes into the same file rather than stalling:
+
 ```
 Listening on 0.0.0.0:5555...
-Client connected from 192.168.x.x
-[00:05:00] 1,842,176 bytes received (1.76 MB)
-[00:10:00] 3,684,352 bytes received (3.51 MB)
+Output file: raw_obs_20260612_191614.ubx
+Client connected from 192.168.x.x:xxxxx
+[00:05:00] 1.76 MB received
+[00:10:00] 3.51 MB received
 ...
-Session complete. File: raw_obs_20260610_120000.ubx
-Convert with: convbin raw_obs_20260610_120000.ubx -o observation.obs -r ubx
-Submit to OPUS: https://www.ngs.noaa.gov/OPUS/
 ```
 
----
+**c. Verify data is actually flowing.** A healthy capture grows at roughly
+**3.2 KB/s** (~280 MB / 24 h) with RXM-RAWX at 1 Hz. Don't trust "the process is
+up" — confirm the **file size is increasing**:
 
-## Phase 1 → Phase 2 Transition Workflow
+```bash
+ls -lh raw_obs_*.ubx        # size should climb every few seconds
+```
 
-Once 24-hour log is collected:
+> **Why this matters:** the original receiver accepted a single connection and
+> blocked forever on it. When the ESP32 reconnected, the new connection piled up
+> unread in the kernel backlog and the file silently stopped growing — a capture
+> looked "running" for two days while collecting nothing. The current receiver
+> fixes this, but always sanity-check the file size.
 
-1. **Convert UBX → RINEX:**
+Let it run a full 24 hours before proceeding.
+
+### 3. Phase 2 — OPUS coordinates → Fixed position
+
+1. **Convert UBX → RINEX** with RTKLIB's `convbin` (build from
+   [`rtklib/RTKLIB`](https://github.com/rtklibexplorer/RTKLIB) or grab a binary):
    ```bash
    convbin raw_obs_YYYYMMDD_HHMMSS.ubx -o observation.obs -r ubx
    ```
-   `convbin` is part of RTKLIB. Install on Linux: build from source or grab a binary from `rtklib/RTKLIB` on GitHub.
+2. **Submit `observation.obs` to NGS OPUS** — https://www.ngs.noaa.gov/OPUS/.
+   Provide approximate position and antenna height (ground to APC). OPUS emails
+   back precise ECEF X/Y/Z + LLA. (Dense CORS coverage gives a tighter solution.)
+3. **Enter the coordinates in u-center:** `UBX-CFG-TMODE3` → `Mode 2 — Fixed
+   Position` → OPUS ECEF (or LLA) → save to BBR + Flash. Re-run
+   `firmware/f9p_verify/` to confirm `CFG-TMODE-MODE` now reads `2`.
 
-2. **Submit to OPUS:**
-   - URL: https://www.ngs.noaa.gov/OPUS/
-   - Upload the `.obs` file
-   - Provide your approximate position and antenna height
-   - OPUS emails back precise ECEF X/Y/Z and LLA coordinates
-   - Warren, MI has excellent SE Michigan CORS coverage — solution should be solid
+> If the antenna is ever physically moved, Phase 2 must be redone.
 
-3. **Enter fixed coordinates in u-center:**
-   - Connect F9P via USB
-   - Open `UBX-CFG-TMODE3`
-   - Set Mode to `2 — Fixed Position`
-   - Enter OPUS coordinates (ECEF or LLA)
-   - Save to BBR + Flash via `UBX-CFG-CFG`
+### 4. Phase 3 — NTRIP caster
 
-4. **Flash NTRIP caster firmware** (Phase 2 sketch — see below)
-
----
-
-## Phase 2: NTRIP Caster Architecture
-
-The ESP32 acts as a self-hosted NTRIP **caster** — rovers connect directly to it on the LAN. No dependency on RTK2Go or any external service.
+Replace the logger firmware with a self-hosted NTRIP **caster** (sketch lives at
+`firmware/phase3_ntrip_caster/` once written). The ESP32 reads RTCM3 from the
+F9P over I2C, handles the NTRIP HTTP handshake, and streams to rovers:
 
 ```
-[ZED-F9P] --I2C/Qwiic--> [ESP32] --WiFi/TCP--> [Rover NTRIP client]
-                           :2101/BASE1
+http://<esp32-static-ip>:2101/BASE1
 ```
 
-- Rover NTRIP client points to: `http://<esp32-static-ip>:2101/BASE1`
-- The ESP32 reads RTCM3 from F9P over I2C, handles the NTRIP HTTP handshake, streams bytes to connected clients
-- F9P is the brain (all GNSS math); ESP32 is purely a network interface
-- Assign a static IP to the ESP32 on the MikroTik DHCP server
+Assign the ESP32 a static IP (DHCP reservation by MAC) so rovers have a stable
+target, then point a rover's NTRIP client at the mount point above and confirm
+it reaches RTK Fix. See `roadmap.md` Phase 3 for the full step list.
 
-### Note on SparkFun tutorial
-The SparkFun DIY GNSS tutorial (https://learn.sparkfun.com/tutorials/how-to-build-a-diy-gnss-reference-station/esp32-setup-option-2) implements an **NTRIP Server** (pushes to RTK2Go), not a **caster**. Do not use that sketch for the self-hosted approach — it routes correction data out to the internet and back, which is unnecessary and adds an external dependency.
-
----
-
-## What Still Needs to Be Done
-
-- [x] Confirm u-center config (TMODE3 Disabled, RTCM messages on I2C, Stationary model) — all 20 checks pass
-- [x] Set WiFi credentials and homelab IP in the logger sketch
-- [x] Flash Phase 1 logger sketch to ESP32
-- [x] Start Python receiver on devnode (192.168.0.55), verify data flowing
-- [ ] Let run 24 hours — **in progress**
-- [ ] Run convbin, submit to OPUS
-- [ ] NOTE: F9P firmware is HPG 1.13; latest is HPG 1.32. Update before Phase 3 install if desired.
-- [ ] Update TMODE3 to Fixed Position with OPUS coordinates
-- [ ] Write / flash Phase 2 NTRIP caster sketch
-- [ ] Assign static IP to ESP32 on MikroTik
-- [ ] Test rover connection
+> **Don't use the SparkFun DIY GNSS tutorial sketch** — it implements an NTRIP
+> *Server* that pushes to RTK2Go (out to the internet and back). For a
+> self-hosted LAN caster that's an unnecessary external dependency.
 
 ---
 
-## Repo / File Notes
+## Key design decisions (settled — don't re-debate)
 
-- The Phase 1 `.ino` sketch and Python receiver were written in a previous Claude chat session. If they need to be regenerated, all relevant context is in this document.
-- Reference config doc: `f9p_base_station_config.md` (generated previously, covers all u-center settings in table form)
+- **I2C, not UART** — SparkFun GNSS v3 library, file-buffer capture mode.
+- **Self-hosted NTRIP caster** over RTK2Go — keeps corrections on the LAN, no
+  internet dependency.
+- **OPUS over survey-in** — PPP post-processing is significantly more accurate
+  than survey-in averaging.
+- **MSM7 over MSM4** — full-resolution carrier phase, worth the larger messages.
+- **TCP push from the ESP32** (Phase 1) — the roof-mounted ESP32 is the client,
+  avoiding NAT/firewall issues reaching a device behind WiFi.
 
 ---
 
-## Key Decisions Made (don't re-debate these)
+## Current status
 
-- **I2C not UART** — SparkFun GNSS v3 library, file buffer capture mode
-- **Self-hosted NTRIP caster** over RTK2Go — avoids internet dependency, keeps corrections on LAN
-- **OPUS over survey-in** — PPP post-processing gives significantly more accurate base coordinates than survey-in averaging; Warren area has excellent CORS coverage
-- **MSM7 over MSM4** — full-resolution carrier phase data, worth the slightly larger RTCM messages
-- **TCP push from ESP32** — ESP32 is the TCP client pushing to homelab, not the server; avoids NAT/firewall issues reaching a roof-mounted device
+Phase 1 capture is running (see `roadmap.md` for the live state and the
+post-capture convbin/OPUS steps). Note: the F9P shipped on firmware HPG 1.13;
+the latest is HPG 1.32 — consider updating before the permanent Phase 3 install.
