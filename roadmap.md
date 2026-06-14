@@ -72,6 +72,46 @@
 
 ---
 
+## Phase 2.5 — Independent accuracy validation against NGS CORS (planned)
+
+**Goal:** Cross-check the OPUS-derived base coordinate against an independent
+reference — the NGS CORS station in Warren, MI — to confirm our accuracy before
+trusting the base for production corrections.
+
+**Dependencies:** Phase 2 complete (OPUS coordinate in hand). Not yet performed.
+
+### Why this is meaningful
+OPUS already differences against ~3 nearby CORS (likely including Warren), so its
+peak-to-peak figure is a consistency measure across the government network. This
+phase adds an *independent* baseline solution as a second opinion. A short
+baseline (our base and the Warren CORS are both in Warren — likely a few km)
+makes it very precise: atmospheric errors largely cancel.
+
+### Method — static baseline in RTKLIB
+1. Download the **Warren CORS** RINEX for the same window as our capture (NGS
+   UFCORS / CORS data page), plus the station's **published coordinates**.
+2. In RTKLIB **`rtkpost`**, process a **Static** baseline: our base raw
+   observations as rover, the CORS as the fixed reference at its published
+   coordinates.
+3. Compare the resulting base-antenna position to our OPUS coordinate.
+   Agreement at **~1–2 cm** validates both; a larger gap points at antenna
+   model, a bad epoch, or (most often) a datum/epoch mismatch.
+
+### The datum/epoch gotcha (read before comparing)
+CORS coordinates are published in **NAD83(2011)** *and* **IGS14/ITRF2014**, at a
+specific epoch, with plate-motion velocities — and **NAD83 vs ITRF differ by
+~1–2 m**. OPUS reports both. Compare apples to apples: same datum, same epoch.
+A ~1 m disagreement is almost always this, not the hardware.
+
+### End-to-end check (after Phase 3)
+Once the caster is live, place a rover on a **published NGS passive mark** (the
+NGS map lists these) and confirm the RTK-fixed position matches the published
+value within a couple cm — this validates the whole chain (base + corrections +
+rover), not just the base coordinate. Lighter variant: survey one point twice,
+once via our base and once via Michigan's state CORS network (MDOT), and compare.
+
+---
+
 ## Phase 3 — NTRIP Caster & Rover Integration
 
 **Goal:** Replace the Phase 1 logger firmware with a self-hosted NTRIP caster so the base station serves centimeter-accurate RTCM3 corrections to rovers on the local network, permanently.
