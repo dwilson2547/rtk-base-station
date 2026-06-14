@@ -51,7 +51,7 @@ ESP32 is a **TCP client** pushing bytes to the receiver; in Phase 3 it is an
 |-----------|-----------|-------|
 | GNSS receiver | u-blox ZED-F9P (SparkFun breakout) | L1/L2 dual-band RTK |
 | Microcontroller | SparkFun ESP32 (Thing Plus) | Connected to F9P via **Qwiic (I2C)** — NOT UART |
-| Antenna | SPK6618H | Multi-band, mounted on a pole, rooftop |
+| Antenna | SPK6618H | Multi-band, mounted on a pole, rooftop. Rebadged Harxon **HFX6618** — use that name for OPUS (step 3) |
 | Power | PoE splitter | In a weatherproof roof enclosure |
 | Backup | 1200 mAh LiPo | Rides out short power outages |
 
@@ -168,14 +168,26 @@ Let it run a full 24 hours before proceeding.
 
 ### 3. Phase 2 — OPUS coordinates → Fixed position
 
-1. **Convert UBX → RINEX** with RTKLIB's `convbin` (build from
-   [`rtklib/RTKLIB`](https://github.com/rtklibexplorer/RTKLIB) or grab a binary):
+1. **Convert UBX → RINEX** with RTKLIB's `convbin`, built from the
+   [rtklibexplorer fork](https://github.com/rtklibexplorer/RTKLIB)
+   (`app/consapp/convbin/gcc && make` — no packaged binary):
    ```bash
    convbin raw_obs_YYYYMMDD_HHMMSS.ubx -o observation.obs -r ubx
+   gzip observation.obs   # ~400 MB → ~140 MB; OPUS accepts gzipped RINEX
    ```
-2. **Submit `observation.obs` to NGS OPUS** — https://www.ngs.noaa.gov/OPUS/.
-   Provide approximate position and antenna height (ground to APC). OPUS emails
-   back precise ECEF X/Y/Z + LLA. (Dense CORS coverage gives a tighter solution.)
+2. **Submit `observation.obs(.gz)` to NGS OPUS** — https://www.ngs.noaa.gov/OPUS/,
+   using **OPUS-Static**. Two field choices matter:
+   - **Antenna type:** the **SPK6618H is not in the NGS list** — it's a rebadged
+     Harxon **`HFX6618`**, which is. Select `HFX6618` (SparkFun's official
+     substitute); it applies a real phase-center calibration, better than NONE.
+   - **Antenna height: `0`.** You want the *antenna* (ARP) coordinate, not a
+     ground mark — with a calibrated type + height 0, OPUS returns the ARP
+     position with phase-center modeling applied, which is exactly what goes into
+     TMODE3. A real height would yield a ground-reduced coordinate that, loaded
+     into TMODE3, shifts every rover solution by that offset.
+
+   OPUS emails back precise ECEF X/Y/Z + LLA. (Dense CORS coverage gives a tighter
+   solution.) Load the returned coordinate into TMODE3 **unchanged**.
 3. **Enter the coordinates in u-center:** `UBX-CFG-TMODE3` → `Mode 2 — Fixed
    Position` → OPUS ECEF (or LLA) → save to BBR + Flash. Re-run
    `firmware/f9p_verify/` to confirm `CFG-TMODE-MODE` now reads `2`.
@@ -217,6 +229,7 @@ it reaches RTK Fix. See `roadmap.md` Phase 3 for the full step list.
 
 ## Current status
 
-Phase 1 capture is running (see `roadmap.md` for the live state and the
-post-capture convbin/OPUS steps). Note: the F9P shipped on firmware HPG 1.13;
-the latest is HPG 1.32 — consider updating before the permanent Phase 3 install.
+Phase 1 capture is **complete** (~45 h, converted to RINEX and gzipped, ready for
+OPUS); next step is the OPUS submission in Phase 2 above. See `roadmap.md` for
+detailed state. Note: the F9P shipped on firmware HPG 1.13; the latest is HPG
+1.32 — consider updating before the permanent Phase 3 install.

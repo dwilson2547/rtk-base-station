@@ -4,7 +4,7 @@
 
 **Goal:** Capture a 24-hour raw GNSS observation file from the permanent antenna location and submit it to NGS OPUS to obtain precise base coordinates.
 
-**Status: 24-hour capture in progress (restarted 2026-06-12 ~19:16 UTC after the permanent roof install; file `raw_obs_20260612_191614.ubx` on devnode). Verified streaming RXM-RAWX @ 1 Hz + RXM-SFRBX, ~3.2 KB/s.**
+**Status: ✅ Capture complete. Ran 2026-06-12 19:16 → 2026-06-14 16:23 UTC (~45 h, well past the 24 h target) on devnode, file `raw_obs_20260612_191614.ubx` (505 MB). Converted to RINEX 3.04 with `convbin` → `observation.obs` (multi-GNSS: GPS/GLO/GAL/BDS/SBAS, dual-frequency). Gzipped to `observation.obs.gz` (136 MB), ready for OPUS submission.**
 
 ### What was built
 - **`firmware/phase1_raw_logger/`** — ESP32 Arduino sketch that connects to the F9P over I2C, enables RXM-RAWX + RXM-SFRBX logging, and streams raw UBX bytes over WiFi/TCP to the homelab
@@ -22,7 +22,7 @@
 1. ~~Set WiFi credentials and homelab IP~~ ✅ serverIP set to devnode (192.168.0.55)
 2. ~~Flash Phase 1 logger sketch~~ ✅ Running on ESP32
 3. ~~Start Python receiver on homelab~~ ✅ Running on devnode, writing `raw_obs_20260612_191614.ubx`
-4. Let capture run 24 hours — **in progress** (completes ~2026-06-13 19:16 UTC), allow to complete before proceeding to Phase 2
+4. ~~Let capture run 24 hours~~ ✅ Ran ~45 h, converted to RINEX, ready for OPUS — proceed to Phase 2
 
 ---
 
@@ -33,14 +33,27 @@
 **Dependencies:** Phase 1 capture complete
 
 ### Steps
-1. **Convert UBX → RINEX** using RTKLIB's `convbin`:
+1. **Convert UBX → RINEX** using RTKLIB's `convbin`. There's no packaged binary;
+   build it from the [rtklibexplorer fork](https://github.com/rtklibexplorer/RTKLIB)
+   (`app/consapp/convbin/gcc && make`), then:
    ```bash
    convbin raw_obs_YYYYMMDD_HHMMSS.ubx -o observation.obs -r ubx
    ```
+   A 24 h 1 Hz multi-GNSS file produces a ~400 MB RINEX; `gzip` it before upload
+   (compresses ~3×). OPUS accepts gzipped RINEX.
 
 2. **Submit to NGS OPUS** at https://www.ngs.noaa.gov/OPUS/
-   - Upload the `.obs` file
-   - Provide approximate position and antenna height (measure from ground to APC)
+   - Upload the `.obs` (or `.obs.gz`) file; use **OPUS-Static** (accepts 2–48 h)
+   - **Antenna type:** the SparkFun **SPK6618H is not in the NGS antenna list**.
+     It is a rebadged **Harxon HFX6618**, which *is* — select **`HFX6618`**
+     (confirmed by SparkFun as the official substitute). This applies a real
+     phase-center calibration, which is better than choosing NONE.
+   - **Antenna height: enter `0`.** For an RTK base we want the coordinate of the
+     *antenna* (ARP), not a ground mark. With a calibrated type + height 0, OPUS
+     returns the ARP position with phase-center modeling applied — exactly the
+     point that goes into TMODE3. Entering a real height would make OPUS report a
+     ground-reduced coordinate; loading *that* into TMODE3 would shift every rover
+     solution by the height offset.
    - OPUS emails back ECEF X/Y/Z + LLA coordinates with uncertainty estimates
    - Warren, MI has dense SE Michigan CORS coverage — expect a good solution
 
