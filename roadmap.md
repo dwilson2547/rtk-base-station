@@ -4,7 +4,7 @@
 
 **Goal:** Capture a 24-hour raw GNSS observation file from the permanent antenna location and submit it to NGS OPUS to obtain precise base coordinates.
 
-**Status: ✅ Capture complete. Ran 2026-06-12 19:16 → 2026-06-14 16:23 UTC (~45 h, well past the 24 h target) on devnode, file `raw_obs_20260612_191614.ubx` (505 MB). Converted to RINEX 3.04 with `convbin` → `observation.obs` (multi-GNSS: GPS/GLO/GAL/BDS/SBAS, dual-frequency). Gzipped to `observation.obs.gz` (136 MB), ready for OPUS submission.**
+**Status: ✅ Capture complete and OPUS-solved.** Ran 2026-06-12 19:16 → 2026-06-14 16:23 UTC (~45 h, well past the 24 h target) on devnode, file `raw_obs_20260612_191614.ubx` (505 MB), verified continuous 1 Hz with zero gaps. A single UTC day (Jun 13) was converted to OPUS-compliant RINEX and solved successfully — see Phase 2 and [`coords.md`](coords.md).
 
 ### What was built
 - **`firmware/phase1_raw_logger/`** — ESP32 Arduino sketch that connects to the F9P over I2C, enables RXM-RAWX + RXM-SFRBX logging, and streams raw UBX bytes over WiFi/TCP to the homelab
@@ -32,43 +32,57 @@
 
 **Dependencies:** Phase 1 capture complete
 
-### Steps
-1. **Convert UBX → RINEX** using RTKLIB's `convbin`. There's no packaged binary;
-   build it from the [rtklibexplorer fork](https://github.com/rtklibexplorer/RTKLIB)
-   (`app/consapp/convbin/gcc && make`), then:
-   ```bash
-   convbin raw_obs_YYYYMMDD_HHMMSS.ubx -o observation.obs -r ubx
-   ```
-   A 24 h 1 Hz multi-GNSS file produces a ~400 MB RINEX; `gzip` it before upload
-   (compresses ~3×). OPUS accepts gzipped RINEX.
+**Status: 🟡 OPUS solution obtained (2026-06-15); TMODE3 entry pending.** Coordinate recorded in [`coords.md`](coords.md) — NAD83(2011) ARP, ≤ 8 mm peak-to-peak, RMS 0.015 m, 92% obs used, 94% ambiguities fixed. Remaining: enter into TMODE3 (step 3) and verify (step 4).
 
-2. **Submit to NGS OPUS** at https://www.ngs.noaa.gov/OPUS/
-   - Upload the `.obs` (or `.obs.gz`) file; use **OPUS-Static** (accepts 2–48 h)
-   - **Antenna type:** the SparkFun **SPK6618H is not in the NGS antenna list**.
-     It is a rebadged **Harxon HFX6618**, which *is* — select **`HFX6618`**
-     (confirmed by SparkFun as the official substitute). This applies a real
-     phase-center calibration, which is better than choosing NONE.
-   - **Antenna height: enter `0`.** For an RTK base we want the coordinate of the
-     *antenna* (ARP), not a ground mark. With a calibrated type + height 0, OPUS
-     returns the ARP position with phase-center modeling applied — exactly the
-     point that goes into TMODE3. Entering a real height would make OPUS report a
-     ground-reduced coordinate; loading *that* into TMODE3 would shift every rover
-     solution by the height offset.
-   - OPUS emails back ECEF X/Y/Z + LLA coordinates with uncertainty estimates
-   - Warren, MI has dense SE Michigan CORS coverage — expect a good solution
+### Steps
+1. **Convert UBX → OPUS-compliant RINEX** using RTKLIB's `convbin` (built from the
+   [rtklibexplorer fork](https://github.com/rtklibexplorer/RTKLIB),
+   `app/consapp/convbin/gcc && make` — no packaged binary). OPUS is **picky**; a
+   plain conversion gets rejected three ways. Use exactly:
+   ```bash
+   convbin raw_obs_YYYYMMDD_HHMMSS.ubx -r ubx \
+     -ro "-TADJ=1.0" -v 2.11 -ti 30 \
+     -ts 2026/06/13 00:00:00 -te 2026/06/13 23:59:59 \
+     -o observation.obs
+   gzip observation.obs        # 24 h @ 30 s ≈ 2.4 MB gzipped
+   ```
+   Each flag fixes a real rejection (full write-up:
+   `docs/issues/2026_06_15_f9p_clock_offset_opus_epoch_grid.md`):
+   - **`-ro "-TADJ=1.0"`** — F9P's unsteered clock puts raw epochs off the
+     integer-second grid (e.g. `:59.995`); OPUS needs them exactly on-grid.
+     `-TADJ` snaps time tags to integer seconds and corrects observations. Without
+     it, `-ti` also silently drops ~half the data.
+   - **`-v 2.11`** — convbin defaults to RINEX 3.04, rejected as unrecognized;
+     2.11 is OPUS's reliable format.
+   - **`-ti 30`** — decimate to 30 s (full-rate 1 Hz is "too much data").
+   - **`-ts`/`-te`** — single UTC day. OPUS allows ≤ 48 h crossing UTC midnight
+     ≤ once; the 45 h capture crossed twice.
+
+2. **Submit `observation.obs.gz` to NGS OPUS** at https://www.ngs.noaa.gov/OPUS/
+   - Use **OPUS-Static**
+   - **Antenna type:** SparkFun **SPK6618H is not in the NGS list** — it is a
+     rebadged **Harxon HFX6618**, which *is*. Select **`HFX6618`** (SparkFun's
+     official substitute); applies a real phase-center calibration, better than NONE.
+   - **Antenna height: enter `0`.** For an RTK base we want the *antenna* (ARP)
+     coordinate, not a ground mark. With a calibrated type + height 0, OPUS returns
+     the ARP position with phase-center modeling applied — exactly what goes into
+     TMODE3. A real height would yield a ground-reduced coordinate that, loaded into
+     TMODE3, shifts every rover solution by the height offset.
+   - OPUS emails back ECEF X/Y/Z + LLA in **two frames** (NAD83(2011) and ITRF2020)
 
 3. **Update F9P TMODE3 via u-center** (F9P USB on `/dev/ttyACM0`):
    - Open `UBX-CFG-TMODE3`
    - Set Mode to `2 — Fixed Position`
-   - Enter OPUS ECEF coordinates (or LLA)
+   - Enter the OPUS **NAD83(2011)** ECEF coordinates (or LLA) — see `coords.md`
    - Save to BBR + Flash via `UBX-CFG-CFG`
 
 4. **Verify fixed mode** with the verifier sketch — `CFG-TMODE-MODE` should now read `2` instead of `0`
 
 ### Notes
 - The OPUS solution is significantly more accurate than survey-in averaging; do not shortcut with survey-in
+- **Datum:** load NAD83(2011), not ITRF2020 — rovers then report in the US standard datum. The two differ by ~1–2 m; don't mix them
 - If the antenna is moved at any point after this step, Phase 2 must be redone
-- Record the OPUS-derived coordinates in the project for reference (add to this file or a separate `coords.md`)
+- OPUS used **ultra-rapid** orbits (data was recent). Already ≤ 8 mm p-p, so fine to use; optionally resubmit the same file in ~2 weeks once IGS final orbits post, for the definitive coordinate
 
 ---
 
@@ -81,11 +95,12 @@ trusting the base for production corrections.
 **Dependencies:** Phase 2 complete (OPUS coordinate in hand). Not yet performed.
 
 ### Why this is meaningful
-OPUS already differences against ~3 nearby CORS (likely including Warren), so its
-peak-to-peak figure is a consistency measure across the government network. This
-phase adds an *independent* baseline solution as a second opinion. A short
-baseline (our base and the Warren CORS are both in Warren — likely a few km)
-makes it very precise: atmospheric errors largely cancel.
+OPUS differenced against three CORS — MIFW Fort Wayne (27 km), MIWA Romeo
+(27 km), MILI Livonia (34 km) — and **notably did *not* use Warren CORS**, which
+it lists as the nearest published control point at just **227.2 m** (PID DG9785).
+That makes Warren a fully **independent** reference, and a ~227 m baseline is
+about as good as it gets: atmospheric errors almost entirely cancel, so a
+baseline solution should agree with our OPUS coordinate at the few-mm level.
 
 ### Method — static baseline in RTKLIB
 1. Download the **Warren CORS** RINEX for the same window as our capture (NGS

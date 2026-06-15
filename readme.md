@@ -170,12 +170,29 @@ Let it run a full 24 hours before proceeding.
 
 1. **Convert UBX → RINEX** with RTKLIB's `convbin`, built from the
    [rtklibexplorer fork](https://github.com/rtklibexplorer/RTKLIB)
-   (`app/consapp/convbin/gcc && make` — no packaged binary):
+   (`app/consapp/convbin/gcc && make` — no packaged binary). OPUS is **picky** —
+   a plain conversion gets rejected three different ways. Use exactly this:
    ```bash
-   convbin raw_obs_YYYYMMDD_HHMMSS.ubx -o observation.obs -r ubx
-   gzip observation.obs   # ~400 MB → ~140 MB; OPUS accepts gzipped RINEX
+   convbin raw_obs_YYYYMMDD_HHMMSS.ubx -r ubx \
+     -ro "-TADJ=1.0" -v 2.11 -ti 30 \
+     -ts 2026/06/13 00:00:00 -te 2026/06/13 23:59:59 \
+     -o observation.obs
+   gzip observation.obs        # ~24 h @ 30 s ≈ 2.4 MB gzipped
    ```
-2. **Submit `observation.obs(.gz)` to NGS OPUS** — https://www.ngs.noaa.gov/OPUS/,
+   Each flag fixes a real OPUS rejection (see
+   [`docs/issues/2026_06_15_f9p_clock_offset_opus_epoch_grid.md`](docs/issues/2026_06_15_f9p_clock_offset_opus_epoch_grid.md)):
+   - **`-ro "-TADJ=1.0"`** — the F9P's clock is unsteered, so raw epochs sit off
+     the integer-second grid (e.g. `:59.995`). OPUS requires epochs exactly on
+     the grid; `-TADJ` snaps time tags to integer seconds *and* corrects the
+     observations for the shift. (Without it, `-ti` also drops ~half the data.)
+   - **`-v 2.11`** — convbin defaults to RINEX 3.04, which OPUS rejected as
+     unrecognized. 2.11 is OPUS's bulletproof format.
+   - **`-ti 30`** — decimate to 30 s (OPUS only uses 30 s; a full-rate 1 Hz file
+     is "too much data").
+   - **`-ts`/`-te`** — trim to a **single UTC day**. OPUS-Static allows ≤ 48 h
+     crossing UTC midnight at most once; our 45 h capture crossed twice. Pick a
+     day with full coverage.
+2. **Submit `observation.obs.gz` to NGS OPUS** — https://www.ngs.noaa.gov/OPUS/,
    using **OPUS-Static**. Two field choices matter:
    - **Antenna type:** the **SPK6618H is not in the NGS list** — it's a rebadged
      Harxon **`HFX6618`**, which is. Select `HFX6618` (SparkFun's official
@@ -186,11 +203,14 @@ Let it run a full 24 hours before proceeding.
      TMODE3. A real height would yield a ground-reduced coordinate that, loaded
      into TMODE3, shifts every rover solution by that offset.
 
-   OPUS emails back precise ECEF X/Y/Z + LLA. (Dense CORS coverage gives a tighter
-   solution.) Load the returned coordinate into TMODE3 **unchanged**.
+   OPUS emails back precise ECEF X/Y/Z + LLA in **two reference frames**
+   (NAD83(2011) and ITRF2020). For a US base, use **NAD83(2011)** — rover
+   positions then come out in the US standard datum. The two differ by ~1–2 m;
+   don't mix them. Load the returned coordinate into TMODE3 **unchanged**.
 3. **Enter the coordinates in u-center:** `UBX-CFG-TMODE3` → `Mode 2 — Fixed
-   Position` → OPUS ECEF (or LLA) → save to BBR + Flash. Re-run
-   `firmware/f9p_verify/` to confirm `CFG-TMODE-MODE` now reads `2`.
+   Position` → OPUS **NAD83(2011)** ECEF (or LLA) → save to BBR + Flash. Re-run
+   `firmware/f9p_verify/` to confirm `CFG-TMODE-MODE` now reads `2`. Record the
+   solution in [`coords.md`](coords.md).
 
 > If the antenna is ever physically moved, Phase 2 must be redone.
 
@@ -229,7 +249,9 @@ it reaches RTK Fix. See `roadmap.md` Phase 3 for the full step list.
 
 ## Current status
 
-Phase 1 capture is **complete** (~45 h, converted to RINEX and gzipped, ready for
-OPUS); next step is the OPUS submission in Phase 2 above. See `roadmap.md` for
-detailed state. Note: the F9P shipped on firmware HPG 1.13; the latest is HPG
-1.32 — consider updating before the permanent Phase 3 install.
+Phases 1 and the OPUS half of Phase 2 are **complete** — we have a precise base
+coordinate (NAD83(2011), ≤ 8 mm peak-to-peak, 94% ambiguities fixed; see
+[`coords.md`](coords.md)). **Next:** enter it into the F9P `TMODE3` Fixed
+Position and verify. See `roadmap.md` for detailed state. Note: the F9P shipped
+on firmware HPG 1.13; the latest is HPG 1.32 — consider updating before the
+permanent Phase 3 install.
