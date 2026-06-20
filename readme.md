@@ -166,6 +166,40 @@ ls -lh raw_obs_*.ubx        # size should climb every few seconds
 
 Let it run a full 24 hours before proceeding.
 
+### Firmware updates over WiFi (OTA)
+
+Once the board is mounted on the roof, reflashing it over USB is a pain. The roof
+firmware therefore carries **ArduinoOTA** (`firmware/phase1_raw_logger/ota.h`), so
+it can be reflashed over WiFi — most usefully to **swap between the raw logger (a
+future re-survey) and the Phase 3 NTRIP caster** without a roof trip.
+
+**The catch:** OTA only exists in the firmware that is *currently running*. You
+must flash an OTA-capable build over USB **once** to bootstrap it; after that it's
+network-only. And every roof firmware must keep the OTA hooks — flash a build
+without them and you're back on the roof with a cable. The Phase 3 caster carries
+its own copy of `ota.h` (hostname `rtk-base-ntrip`); keep the two in sync.
+
+Before flashing, set the OTA password in `ota.h` (placeholder `YOUR_OTA_PASSWORD`,
+never commit a real one). No partition change is needed — the board's default
+scheme (`Default 6.25MB APP/OTA`) already has the dual app slots OTA requires.
+
+```bash
+# One-time bootstrap over USB (gets OTA onto the board)
+arduino-cli compile --fqbn esp32:esp32:esp32thing_plus firmware/phase1_raw_logger
+arduino-cli upload  --fqbn esp32:esp32:esp32thing_plus -p /dev/ttyACM0 \
+  firmware/phase1_raw_logger
+
+# Thereafter, push over WiFi — no USB:
+arduino-cli upload  --fqbn esp32:esp32:esp32thing_plus \
+  -p <esp32-ip> --protocol network firmware/phase1_raw_logger
+
+# Which firmware is on the roof right now? Discover by mDNS hostname:
+avahi-browse -rt _arduino._tcp   # rtk-base-logger vs rtk-base-ntrip
+```
+
+The board pauses its main loop during an upload — a brief capture gap for the
+logger, a momentary corrections dropout for the caster. Both are harmless.
+
 ### 3. Phase 2 — OPUS coordinates → Fixed position
 
 1. **Convert UBX → RINEX** with RTKLIB's `convbin`, built from the

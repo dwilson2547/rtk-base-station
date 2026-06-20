@@ -12,6 +12,7 @@
 #include <Wire.h>
 #include <WiFi.h>
 #include <SparkFun_u-blox_GNSS_v3.h>
+#include "ota.h"   // network firmware updates (ArduinoOTA) — see ota.h header
 
 // ---- Configuration — set these before flashing ----
 const char* ssid       = "YOUR_WIFI_SSID";
@@ -129,6 +130,7 @@ void setup() {
   Serial.println("RXM-SFRBX enabled");
 
   connectWiFi();
+  otaBegin("rtk-base-logger");  // reachable for OTA reflash once WiFi is up
 
   while (!connectTCP()) {
     Serial.println("Retrying TCP in 5s...");
@@ -142,6 +144,10 @@ void setup() {
 // ---------------------------------------------------------------------------
 
 void loop() {
+  // Service OTA first, before any early-return paths below — so the board stays
+  // reflashable even when the TCP receiver is down (e.g. between captures).
+  otaLoop();
+
   // Reconnect if dropped
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("WiFi lost, reconnecting...");
